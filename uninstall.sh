@@ -9,7 +9,10 @@ rm -f "$DESKTOP_FILE" "$ICON_FILE"
 update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/dev/null || true
 
 systemctl --user disable hermes-gateway-wake.service 2>/dev/null || true
+systemctl --user disable --now hermes-console-watch.timer 2>/dev/null || true
 rm -f "$WAKE_SVC"
+rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/hermes-console-watch.service"
+rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/hermes-console-watch.timer"
 systemctl --user daemon-reload 2>/dev/null || true
 
 echo "Removed desktop entry and wake service."

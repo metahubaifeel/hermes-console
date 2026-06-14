@@ -2,7 +2,6 @@
 """Hermes Gateway Console — one-click restart and Discord reconnect for daily use."""
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import threading
@@ -10,29 +9,10 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
-def _resolve_hermes_home() -> Path:
-    env = os.environ.get("HERMES_HOME")
-    if env:
-        return Path(env)
-    unit = Path.home() / ".config/systemd/user/hermes-gateway.service"
-    if unit.is_file():
-        for line in unit.read_text(encoding="utf-8").splitlines():
-            if line.startswith('Environment="HERMES_HOME='):
-                return Path(line.split("=", 1)[1].strip().strip('"'))
-    return Path.home() / ".hermes"
-
+from hermes_health import HERMES_HOME, assess_health, discord_live_ok
 
 ROOT = Path(__file__).resolve().parent
-HERMES_HOME = _resolve_hermes_home()
 RESTART_SH = ROOT / "hermes_gateway_restart.sh"
-
-_DISCORD_ERROR_NEEDLES = (
-    "Cannot connect to host gateway",
-    "discord.client: Attempting a reconnect",
-    "ClientConnectorError",
-    "Connection timeout to host wss://gateway",
-    "ConnectionResetError",
-)
 
 
 def _run(cmd: list[str] | str, *, timeout: float = 180, shell: bool = False) -> tuple[int, str]:
@@ -53,112 +33,11 @@ def _run(cmd: list[str] | str, *, timeout: float = 180, shell: bool = False) -> 
         return 1, str(e)
 
 
-def gateway_active() -> bool:
-    code, out = _run(["systemctl", "--user", "is-active", "hermes-gateway.service"], timeout=5)
-    return code == 0 and out.strip() == "active"
-
-
-def gateway_pid() -> int | None:
-    code, out = _run(
-        ["systemctl", "--user", "show", "hermes-gateway.service", "-p", "MainPID", "--value"],
-        timeout=5,
-    )
-    if code != 0:
-        return None
-    try:
-        pid = int(out.strip())
-    except ValueError:
-        return None
-    return pid if pid > 0 else None
-
-
-def discord_state() -> tuple[str | None, str | None]:
-    state_file = HERMES_HOME / "gateway_state.json"
-    try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        plat = (data.get("platforms") or {}).get("discord") or {}
-        state = plat.get("state")
-        updated_at = plat.get("updated_at")
-        return (state if isinstance(state, str) else None), (
-            updated_at if isinstance(updated_at, str) else None
-        )
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return None, None
-
-
-def gateway_has_zombie_sockets() -> bool:
-    pid = gateway_pid()
-    if not pid:
-        return False
-    code, _ = _run(["bash", "-c", f"command -v lsof >/dev/null"], timeout=2)
-    if code != 0:
-        return False
-    code, out = _run(["lsof", "-nP", "-p", str(pid), "-a", "-iTCP"], timeout=3)
-    if code != 0 or not out:
-        return False
-    return "CLOSE_WAIT" in out
-
-
-def journal_has_needles(since_iso: str | None, needles: tuple[str, ...]) -> bool:
-    cmd = [
-        "journalctl",
-        "--user",
-        "-u",
-        "hermes-gateway.service",
-        "--no-pager",
-        "-n",
-        "120",
-    ]
-    cmd.extend(["--since", since_iso or "10 min ago"])
-    code, out = _run(cmd, timeout=5)
-    if code != 0 or not out:
-        return False
-    return any(n in out for n in needles)
-
-
-def discord_live_ok() -> bool:
-    """True only when Discord is actually usable, not just a stale state file."""
-    state, updated_at = discord_state()
-    if state != "connected":
-        return False
-    if gateway_has_zombie_sockets():
-        return False
-    if journal_has_needles(updated_at, _DISCORD_ERROR_NEEDLES):
-        return False
-    return True
-
-
-def assess_health() -> tuple[bool, str, str, str]:
-    """Return (gateway_running, gateway_text, discord_text, discord_color)."""
-    gw = gateway_active()
-    if not gw:
-        return False, "Gateway：✗ 未运行", "Discord：—", "#c33"
-
-    if discord_live_ok():
-        return True, "Gateway：✓ 运行中", "Discord：✓ 可对话", "#0a7"
-
-    state, _ = discord_state()
-    if state == "connected":
-        return (
-            True,
-            "Gateway：✓ 运行中",
-            "Discord：⚠ 假连接（点「修复并重连」）",
-            "#c90",
-        )
-    if state == "retrying":
-        return True, "Gateway：✓ 运行中", "Discord：✗ 重连失败（勿连点，等 1 分钟）", "#c33"
-    if state == "connecting":
-        return True, "Gateway：✓ 运行中", "Discord：连接中…", "#c90"
-    if state == "disconnected":
-        return True, "Gateway：✓ 运行中", "Discord：✗ 已断开", "#c33"
-    return True, "Gateway：✓ 运行中", "Discord：—", "#888"
-
-
 class LauncherApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Hermes 控制台")
-        self.root.geometry("520x480")
+        self.root.geometry("520x500")
         self.root.minsize(440, 400)
 
         self._busy = False
@@ -181,7 +60,7 @@ class LauncherApp:
         self.lbl_discord = ttk.Label(top, text="Discord：检测中…")
         self.lbl_hint = ttk.Label(
             top,
-            text="重启约 10 秒；修复并重合约 30–120 秒（含 Discord 连接）",
+            text="后台每 2 分钟检查；异常会弹桌面通知。修复并重合约 30–120 秒。",
             foreground="#555",
         )
         for w in (self.lbl_hermes, self.lbl_discord, self.lbl_hint):
@@ -250,7 +129,7 @@ class LauncherApp:
                     lambda: (
                         self._set_busy(
                             False,
-                            hint="重启约 10 秒；修复并重合约 30–120 秒（含 Discord 连接）",
+                            hint="后台每 2 分钟检查；异常会弹桌面通知。修复并重合约 30–120 秒。",
                         ),
                         self.refresh_status(),
                     ),

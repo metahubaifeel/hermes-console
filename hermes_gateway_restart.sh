@@ -57,13 +57,25 @@ wait_network() {
 
 discord_connected() {
   python3 - <<PY
-import json, sys
+import json, sys, subprocess
 from pathlib import Path
 p = Path(${STATE_FILE@Q})
 if not p.is_file():
     sys.exit(1)
 d = json.loads(p.read_text())
 if d.get("gateway_state") != "running":
+    sys.exit(1)
+# State file can stay "connected" after WebSocket dies — require matching PID.
+try:
+    r = subprocess.run(
+        ["systemctl", "--user", "show", "hermes-gateway.service", "-p", "MainPID", "--value"],
+        capture_output=True, text=True, timeout=5,
+    )
+    live_pid = int((r.stdout or "").strip())
+    file_pid = int(d.get("pid") or 0)
+except (ValueError, subprocess.TimeoutExpired):
+    live_pid = file_pid = 0
+if file_pid <= 0 or live_pid <= 0 or file_pid != live_pid:
     sys.exit(1)
 dc = (d.get("platforms") or {}).get("discord") or {}
 sys.exit(0 if dc.get("state") == "connected" else 1)

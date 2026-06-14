@@ -56,9 +56,10 @@ bash "$DIR/scripts/preflight.sh"
 # shellcheck source=hermes_detect.sh
 source "$DIR/hermes_detect.sh"
 
-chmod +x "$APP_PY" "$DIR/install.sh" "$DIR/hermes_gateway_restart.sh" "$DIR/hermes_install_gateway_hooks.sh"
+chmod +x "$APP_PY" "$DIR/install.sh" "$DIR/hermes_gateway_restart.sh" "$DIR/hermes_install_gateway_hooks.sh" "$DIR/hermes_health.py"
 
 bash "$DIR/hermes_install_gateway_hooks.sh"
+bash "$DIR/scripts/install_watch.sh"
 
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 DESKTOP_FILE="$DESKTOP_DIR/hermes-console.desktop"

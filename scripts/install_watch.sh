@@ -19,7 +19,8 @@ Description=Hermes Console health check and desktop notification
 [Service]
 Type=oneshot
 Environment="HERMES_HOME=$HERMES_HOME"
-Environment="HERMES_AUTO_REPAIR=1"
+Environment="HERMES_AUTO_REPAIR=0"
+Environment="HERMES_NOTIFY_COOLDOWN=3600"
 ExecStart=/usr/bin/env python3 "$HEALTH_PY" --watch
 EOF
 

@@ -28,8 +28,9 @@ _APPROVAL_NEEDLES = (
 )
 
 _NOTIFY_COOLDOWN_SEC = int(os.environ.get("HERMES_NOTIFY_COOLDOWN", "300"))
-_AUTO_REPAIR_COOLDOWN_SEC = int(os.environ.get("HERMES_AUTO_REPAIR_COOLDOWN", "900"))
-_AUTO_REPAIR_AFTER = int(os.environ.get("HERMES_AUTO_REPAIR_AFTER", "2"))
+_AUTO_REPAIR_COOLDOWN_SEC = int(os.environ.get("HERMES_AUTO_REPAIR_COOLDOWN", "3600"))
+_AUTO_REPAIR_AFTER = int(os.environ.get("HERMES_AUTO_REPAIR_AFTER", "5"))
+_ACTIVITY_MINUTES = int(os.environ.get("HERMES_DISCORD_ACTIVITY_MIN", "120"))
 ROOT = Path(__file__).resolve().parent
 RESTART_SH = ROOT / "hermes_gateway_restart.sh"
 
@@ -131,7 +132,46 @@ def gateway_state_pid_matches() -> bool:
         return False
 
 
+def _journal_since(minutes: int, pattern: str) -> str:
+    cmd = [
+        "journalctl",
+        "--user",
+        "-u",
+        "hermes-gateway.service",
+        "--no-pager",
+        "-n",
+        "200",
+        "--since",
+        f"{minutes} min ago",
+    ]
+    code, out = _run(cmd, timeout=8)
+    if code != 0 or not out:
+        return ""
+    if pattern:
+        lines = [ln for ln in out.splitlines() if pattern in ln]
+        return "\n".join(lines)
+    return out
+
+
+def discord_recently_active() -> bool:
+    """Trust real traffic over stale gateway_state.json (state file often lags)."""
+    return bool(_journal_since(_ACTIVITY_MINUTES, "inbound message: platform=discord"))
+
+
+def discord_connected_recently(minutes: int = 30) -> bool:
+    out = _journal_since(minutes, "")
+    if not out:
+        return False
+    return "Connected as hermes" in out or "✓ discord connected" in out
+
+
 def discord_live_ok() -> bool:
+    if not gateway_active():
+        return False
+    # If you are actually chatting, do not alarm — even when state file says retrying.
+    if discord_recently_active() or discord_connected_recently():
+        return True
+
     state, updated_at = discord_state()
     if state != "connected":
         return False
@@ -233,12 +273,15 @@ def notify(title: str, body: str, *, urgency: str = "normal") -> bool:
 
 
 def _try_auto_repair(prev: dict, snap: dict, now: float) -> bool:
-    """Run repair script when Discord stays broken. Returns True if repair started."""
-    if os.environ.get("HERMES_AUTO_REPAIR", "1") == "0":
+    """Silent auto-repair — off by default (HERMES_AUTO_REPAIR=1 to enable)."""
+    if os.environ.get("HERMES_AUTO_REPAIR", "0") != "1":
         return False
     if snap.get("approval_pending"):
         return False
     if snap.get("discord_live"):
+        return False
+    if discord_recently_active() or discord_connected_recently():
+        prev["bad_streak"] = 0
         return False
     if not RESTART_SH.is_file():
         return False
@@ -252,11 +295,6 @@ def _try_auto_repair(prev: dict, snap: dict, now: float) -> bool:
     if (now - last) < _AUTO_REPAIR_COOLDOWN_SEC:
         return False
 
-    notify(
-        "Hermes 正在自动修复 Discord",
-        "检测到 Discord 不可用（假连接或已断开），正在自动修复并重连，约 1–2 分钟…",
-        urgency="critical",
-    )
     prev["last_auto_repair"] = now
     prev["bad_streak"] = 0
     try:
@@ -295,10 +333,7 @@ def watch_once(*, force: bool = False) -> dict:
 
     if snap["level"] == "critical":
         body = "；".join(snap["issues"]) or "Gateway / Discord 异常"
-        if os.environ.get("HERMES_AUTO_REPAIR", "1") != "0":
-            body += "。后台将在约 4 分钟内自动尝试修复（或手动点一次「修复并重连」）。"
-        else:
-            body += "。打开「Hermes 控制台」→ 修复并重连（勿连点）。"
+        body += "。若 Discord 仍能对话可忽略；否则打开控制台点一次「修复并重连」。"
         should_notify = force or (key != prev_key and cooldown_ok) or (
             snap["level"] != prev.get("level") and cooldown_ok
         )
@@ -308,7 +343,7 @@ def watch_once(*, force: bool = False) -> dict:
         if snap["approval_pending"]:
             body += "。去 Discord 点批准按钮，否则任务会卡住。"
         elif "假连接" in snap.get("discord_text", ""):
-            body += "。合盖/网络抖后常见，后台会自动尝试修复。"
+            body += "。若仍能对话可忽略；否则点一次「修复并重连」。"
         should_notify = force or (key != prev_key and cooldown_ok)
 
     if should_notify and body:

@@ -155,14 +155,37 @@ def _journal_since(minutes: int, pattern: str) -> str:
 
 def discord_recently_active() -> bool:
     """Trust real traffic over stale gateway_state.json (state file often lags)."""
-    return bool(_journal_since(_ACTIVITY_MINUTES, "inbound message: platform=discord"))
+    if _journal_since(_ACTIVITY_MINUTES, "inbound message: platform=discord"):
+        return True
+    # journal may rotate after restarts — also check log files
+    for name in ("gateway.log", "agent.log"):
+        path = HERMES_HOME / "logs" / name
+        try:
+            if path.stat().st_mtime < (__import__("time").time() - _ACTIVITY_MINUTES * 60):
+                continue
+            tail = path.read_text(encoding="utf-8", errors="replace")[-80000:]
+        except OSError:
+            continue
+        if "inbound message: platform=discord" in tail:
+            return True
+    return False
 
 
 def discord_connected_recently(minutes: int = 30) -> bool:
     out = _journal_since(minutes, "")
-    if not out:
-        return False
-    return "Connected as hermes" in out or "✓ discord connected" in out
+    if out and ("Connected as hermes" in out or "✓ discord connected" in out):
+        return True
+    for name in ("gateway.log", "agent.log"):
+        path = HERMES_HOME / "logs" / name
+        try:
+            if path.stat().st_mtime < (__import__("time").time() - minutes * 60):
+                continue
+            tail = path.read_text(encoding="utf-8", errors="replace")[-50000:]
+        except OSError:
+            continue
+        if "Connected as hermes" in tail or "✓ discord connected" in tail:
+            return True
+    return False
 
 
 def discord_live_ok() -> bool:
